@@ -1,0 +1,10 @@
+{
+  "/api/aemet": {
+    "target": "https://opendata.aemet.es",
+    "changeOrigin": true,
+    "secure": true,
+    "pathRewrite": { "^/api/aemet": "" },
+    "logLevel": "info",
+    "onProxyReq": "function(proxyReq) { proxyReq.setHeader('cache-control', 'no-cache'); }"
+  }
+}
