@@ -1,13 +1,90 @@
 import {
-  Component, OnInit, OnDestroy, ElementRef, ViewChild, inject, NgZone
+  Component,
+  OnInit,
+  OnDestroy,
+  ElementRef,
+  ViewChild,
+  inject,
+  NgZone,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import * as d3 from 'd3';
 import * as topojson from 'topojson-client';
-import type { Topology, GeometryCollection } from 'topojson-specification';
+import type { Feature, FeatureCollection, Geometry, GeoJsonProperties } from 'geojson';
+import type { GeometryCollection, Topology } from 'topojson-specification';
 import { AppStateService } from '../../services/app-state.service';
+import { ComunidadAutonoma } from '../../models/weather.models';
 
-declare const d3CompositeProjections: any;
+declare const d3CompositeProjections: {
+  geoConicConformalSpain?: () => d3.GeoProjection & {
+    getCompositionBorders?: () => string;
+  };
+} | undefined;
+
+type SpainFeature = Feature<Geometry, GeoJsonProperties> & {
+  id?: string | number;
+};
+
+type SpainFeatureCollection = FeatureCollection<Geometry, GeoJsonProperties> & {
+  features: SpainFeature[];
+};
+
+type ScreenBounds = [[number, number], [number, number]];
+
+const PROV_TO_CCAA: Record<string, string> = {
+  '04': 'Andalucía',
+  '11': 'Andalucía',
+  '14': 'Andalucía',
+  '18': 'Andalucía',
+  '21': 'Andalucía',
+  '23': 'Andalucía',
+  '29': 'Andalucía',
+  '41': 'Andalucía',
+  '22': 'Aragón',
+  '44': 'Aragón',
+  '50': 'Aragón',
+  '33': 'Principado de Asturias',
+  '07': 'Illes Balears',
+  '35': 'Canarias',
+  '38': 'Canarias',
+  '39': 'Cantabria',
+  '02': 'Castilla-La Mancha',
+  '13': 'Castilla-La Mancha',
+  '16': 'Castilla-La Mancha',
+  '19': 'Castilla-La Mancha',
+  '45': 'Castilla-La Mancha',
+  '05': 'Castilla y León',
+  '09': 'Castilla y León',
+  '24': 'Castilla y León',
+  '34': 'Castilla y León',
+  '37': 'Castilla y León',
+  '40': 'Castilla y León',
+  '42': 'Castilla y León',
+  '47': 'Castilla y León',
+  '49': 'Castilla y León',
+  '08': 'Cataluña',
+  '17': 'Cataluña',
+  '25': 'Cataluña',
+  '43': 'Cataluña',
+  '06': 'Extremadura',
+  '10': 'Extremadura',
+  '15': 'Galicia',
+  '27': 'Galicia',
+  '32': 'Galicia',
+  '36': 'Galicia',
+  '28': 'Comunidad de Madrid',
+  '30': 'Región de Murcia',
+  '31': 'Comunidad Foral de Navarra',
+  '01': 'País Vasco',
+  '20': 'País Vasco',
+  '48': 'País Vasco',
+  '26': 'La Rioja',
+  '03': 'Comunitat Valenciana',
+  '12': 'Comunitat Valenciana',
+  '46': 'Comunitat Valenciana',
+  '51': 'Ceuta',
+  '52': 'Melilla',
+};
 
 @Component({
   selector: 'app-spain-map',
@@ -16,451 +93,649 @@ declare const d3CompositeProjections: any;
   template: `
     <div class="map-wrapper" #wrapperRef>
       @if (isLoading) {
-        <div class="map-loading"><div class="spinner"></div><span>Cargando mapa…</span></div>
+        <div class="map-loading">
+          <div class="spinner"></div>
+          <span>Cargando mapa…</span>
+        </div>
       }
+
       <svg #svgRef class="map-svg"></svg>
+
       @if (isZoomed) {
-        <button class="back-btn" (click)="zoomOut()">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-            <path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2.2"
-                  stroke-linecap="round" stroke-linejoin="round"/>
+        <button class="back-btn" type="button" (click)="zoomOut()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M19 12H5M12 5l-7 7 7 7"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
           </svg>
-          Ver toda España
+          <span>Ver toda España</span>
         </button>
       }
-      <div class="map-tooltip" [class.visible]="tooltip.visible"
-           [style.left.px]="tooltip.x" [style.top.px]="tooltip.y">
+
+      <div
+        class="map-tooltip"
+        [class.visible]="tooltip.visible"
+        [style.left.px]="tooltip.x"
+        [style.top.px]="tooltip.y"
+      >
         {{ tooltip.name }}
       </div>
     </div>
   `,
-  styles: [`
-    .map-wrapper { position: relative; width: 100%; overflow: hidden; }
-    .map-svg { display: block; width: 100%; height: auto; }
-    .map-loading {
-      position: absolute; inset: 0; display: flex; align-items: center;
-      justify-content: center; gap: 8px; color: var(--sky-600); font-size: 13px;
-      background: rgba(200,230,247,0.6); z-index: 5;
-    }
-    .spinner {
-      width: 20px; height: 20px; border: 2px solid var(--sky-200);
-      border-top-color: var(--sky-600); border-radius: 50%;
-      animation: spin 0.7s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .back-btn {
-      position: absolute; top: 12px; left: 14px;
-      display: flex; align-items: center; gap: 7px;
-      background: rgba(2,116,184,0.92); color: white;
-      border: none; border-radius: 22px; padding: 7px 16px 7px 11px;
-      font-size: 12px; font-weight: 600; font-family: var(--font-primary), system-ui;
-      cursor: pointer; z-index: 20; box-shadow: 0 3px 12px rgba(2,80,140,0.3);
-      animation: slideIn 0.22s ease both; transition: background 0.14s;
-    }
-    .back-btn:hover { background: rgba(2,96,160,1); }
-    @keyframes slideIn { from{opacity:0;transform:translateX(-12px)} to{opacity:1;transform:translateX(0)} }
-    .map-tooltip {
-      position: absolute; background: rgba(5,30,58,0.90); color: white;
-      font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px;
-      pointer-events: none; opacity: 0; transition: opacity 0.12s; white-space: nowrap;
-      transform: translate(-50%, -140%); z-index: 20;
-    }
-    .map-tooltip.visible { opacity: 1; }
-  `]
+  styles: [
+    `
+      .map-wrapper {
+        position: relative;
+        width: 100%;
+        overflow: hidden;
+      }
+
+      .map-svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .map-loading {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        color: var(--sky-600, #0369a1);
+        font-size: 13px;
+        background: rgba(200, 230, 247, 0.6);
+        z-index: 5;
+      }
+
+      .spinner {
+        width: 20px;
+        height: 20px;
+        border: 2px solid var(--sky-200, #bae6fd);
+        border-top-color: var(--sky-600, #0284c7);
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .back-btn {
+        position: absolute;
+        top: 12px;
+        left: 14px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        background: rgba(2, 116, 184, 0.92);
+        color: white;
+        border: none;
+        border-radius: 22px;
+        padding: 7px 16px 7px 11px;
+        font-size: 12px;
+        font-weight: 600;
+        font-family: var(--font-primary), system-ui;
+        cursor: pointer;
+        z-index: 20;
+        box-shadow: 0 3px 12px rgba(2, 80, 140, 0.3);
+        animation: slideIn 0.22s ease both;
+        transition: background 0.14s;
+      }
+
+      .back-btn:hover {
+        background: rgba(2, 96, 160, 1);
+      }
+
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateX(-12px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+
+      .map-tooltip {
+        position: absolute;
+        background: rgba(5, 30, 58, 0.9);
+        color: white;
+        font-size: 12px;
+        font-weight: 500;
+        padding: 5px 12px;
+        border-radius: 20px;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.12s;
+        white-space: nowrap;
+        transform: translate(-50%, -140%);
+        z-index: 20;
+      }
+
+      .map-tooltip.visible {
+        opacity: 1;
+      }
+    `,
+  ],
 })
 export class SpainMapComponent implements OnInit, OnDestroy {
-  @ViewChild('svgRef',     { static: true }) svgRef!:     ElementRef<SVGSVGElement>;
-  @ViewChild('wrapperRef', { static: true }) wrapperRef!: ElementRef<HTMLDivElement>;
+  @ViewChild('svgRef', { static: true })
+  svgRef!: ElementRef<SVGSVGElement>;
 
-  private state = inject(AppStateService);
-  private zone  = inject(NgZone);
+  @ViewChild('wrapperRef', { static: true })
+  wrapperRef!: ElementRef<HTMLDivElement>;
+
+  private readonly state = inject(AppStateService);
+  private readonly zone = inject(NgZone);
 
   isLoading = true;
-  isZoomed  = false;
-  tooltip   = { visible: false, x: 0, y: 0, name: '' };
+  isZoomed = false;
+  tooltip = { visible: false, x: 0, y: 0, name: '' };
 
-  private svg!:     d3.Selection<SVGSVGElement, unknown, null, undefined>;
-  private projFull!: any; // full-Spain projection
-  private pathFull!: d3.GeoPath;
-  private W = 0; private H = 0;
+  private W = 0;
+  private H = 0;
+  private proj!: d3.GeoProjection & { getCompositionBorders?: () => string };
+  private pathFn!: d3.GeoPath<any, SpainFeature>;
+  private svg!: d3.Selection<SVGSVGElement, unknown, null, undefined>;
 
-  private topoCC:   Topology | null = null;
+  private topoCC: Topology | null = null;
   private topoProv: Topology | null = null;
 
-  // Map from normalised CCAA name → TopoJSON feature (for zoom)
-  private ccaaFeatureMap = new Map<string, any>();
-  // Map from normalised CCAA name → province features
-  private provFeatureMap = new Map<string, any[]>();
+  private screenBounds = new Map<string, ScreenBounds>();
+  private ccaaByName = new Map<string, SpainFeature>();
+  private provByCCAA = new Map<string, SpainFeature[]>();
 
   private resizeObserver?: ResizeObserver;
   private resizeTimer?: ReturnType<typeof setTimeout>;
 
-  async ngOnInit() {
+  async ngOnInit(): Promise<void> {
     await this.loadLib();
+
     [this.topoCC, this.topoProv] = await Promise.all([
       this.fetchTopo('https://unpkg.com/es-atlas@0.5.0/es/autonomous_regions.json'),
       this.fetchTopo('https://unpkg.com/es-atlas@0.5.0/es/provinces.json'),
     ]);
-    this.indexFeatures();
-    this.buildMap();
+
+    this.buildFullMap();
     this.setupResize();
   }
 
-  ngOnDestroy() {
+  ngOnDestroy(): void {
     this.resizeObserver?.disconnect();
-    clearTimeout(this.resizeTimer);
+    if (this.resizeTimer) {
+      clearTimeout(this.resizeTimer);
+    }
   }
 
   zoomOut(): void {
     this.isZoomed = false;
-    const todas = this.state.comunidades().find(c => c.id === '00');
-    if (todas) this.state.selectCCAA(todas);
-    this.zone.run(() => {
-      this.rebuildWithProjection(null); // null = use full Spain projection
-    });
+    const todas = this.state.comunidades().find((c) => c.id === '00');
+    if (todas) {
+      this.state.selectCCAA(todas);
+    }
+    this.zone.run(() => this.resetViewBox());
   }
 
-  // ── Load d3-composite-projections ─────────────────────────────────────────
   private loadLib(): Promise<void> {
-    return new Promise(resolve => {
-      if (typeof d3CompositeProjections !== 'undefined') { resolve(); return; }
-      const s = document.createElement('script');
-      s.src = 'https://unpkg.com/d3-composite-projections@1.4.0/dist/d3-composite-projections.min.js';
-      s.onload = s.onerror = () => resolve();
-      document.head.appendChild(s);
+    return new Promise((resolve) => {
+      if (typeof d3CompositeProjections !== 'undefined') {
+        resolve();
+        return;
+      }
+
+      const script = document.createElement('script');
+      script.src =
+        'https://unpkg.com/d3-composite-projections@1.4.0/dist/d3-composite-projections.min.js';
+      script.onload = () => resolve();
+      script.onerror = () => resolve();
+      document.head.appendChild(script);
     });
   }
 
   private async fetchTopo(url: string): Promise<Topology | null> {
-    try { return await d3.json<Topology>(url) ?? null; } catch { return null; }
+    try {
+      const data = await d3.json(url);
+      return (data as Topology) ?? null;
+    } catch {
+      return null;
+    }
   }
 
-  // ── Index features by normalised CCAA name ─────────────────────────────────
-  private indexFeatures(): void {
-    if (!this.topoCC) return;
-
-    const ccaaGeo = topojson.feature(
-      this.topoCC, (this.topoCC as any).objects.autonomous_regions as GeometryCollection
-    );
-
-    (ccaaGeo as any).features.forEach((f: any) => {
-      const name = this.ccaaLabel(f);
-      this.ccaaFeatureMap.set(this.norm(name), f);
-    });
-
-    // Index provinces: group by the CCAA they belong to using the province code prefix
-    if (!this.topoProv) return;
-    const provGeo = topojson.feature(
-      this.topoProv, (this.topoProv as any).objects.provinces as GeometryCollection
-    );
-
-    // Log first province properties to understand the data structure
-    const firstProv = (provGeo as any).features[0];
-    console.log('[MAP] Province properties sample:', firstProv?.properties);
-
-    // Build a mapping: for each province feature, find which CCAA it belongs to
-    // by checking if the province centroid (geographic) falls within any CCAA
-    // We use the code prefix: province codes are 2-digit INE codes
-    // CCAA INE codes: 01=AND,02=ARA,03=AST,04=BAL,05=CAN,06=CNT,07=CLM,08=CYL,
-    //                 09=CAT,10=EXT,11=GAL,12=?,13=MAD,14=MUR,15=NAV,16=PV,17=RIO,18=VAL
-    const provinceToCC: Record<string, string> = {
-      '04':'01','11':'01','14':'01','18':'01','21':'01','23':'01','29':'01','41':'01', // Andalucía
-      '22':'02','44':'02','50':'02', // Aragón
-      '33':'03',                    // Asturias
-      '07':'04',                    // Baleares
-      '35':'05','38':'05',          // Canarias
-      '39':'06',                    // Cantabria
-      '02':'07','13':'07','16':'07','19':'07','45':'07', // C-La Mancha
-      '05':'08','09':'08','24':'08','34':'08','37':'08','40':'08','42':'08','47':'08','49':'08', // CyL
-      '08':'09','17':'09','25':'09','43':'09', // Cataluña
-      '06':'10','10':'10',          // Extremadura
-      '15':'11','27':'11','32':'11','36':'11', // Galicia
-      '28':'13',                    // Madrid
-      '30':'14',                    // Murcia
-      '31':'15',                    // Navarra
-      '01':'16','20':'16','48':'16', // País Vasco
-      '26':'17',                    // La Rioja
-      '03':'18','12':'18','46':'18', // Valencia
-      '51':'19',                    // Ceuta
-      '52':'20',                    // Melilla
-    };
-
-    // Reverse: CCAA code → list of province features
-    const ccaaCodeToName: Record<string, string> = {
-      '01':'Andalucía','02':'Aragón','03':'Principado de Asturias',
-      '04':'Illes Balears','05':'Canarias','06':'Cantabria',
-      '07':'Castilla-La Mancha','08':'Castilla y León','09':'Cataluña',
-      '10':'Extremadura','11':'Galicia','13':'Comunidad de Madrid',
-      '14':'Región de Murcia','15':'Comunidad Foral de Navarra',
-      '16':'País Vasco','17':'La Rioja','18':'Comunitat Valenciana',
-      '19':'Ceuta','20':'Melilla',
-    };
-
-    (provGeo as any).features.forEach((f: any) => {
-      // Try to get province code from properties
-      const rawCode = String(
-        f.properties?.code ?? f.properties?.CODE ??
-        f.properties?.cpro ?? f.properties?.CPRO ?? ''
-      ).padStart(2, '0');
-
-      const ccaaCode = provinceToCC[rawCode];
-      if (!ccaaCode) return;
-
-      const ccaaName = ccaaCodeToName[ccaaCode];
-      if (!ccaaName) return;
-
-      const key = this.norm(ccaaName);
-      if (!this.provFeatureMap.has(key)) this.provFeatureMap.set(key, []);
-      this.provFeatureMap.get(key)!.push(f);
-    });
-
-    console.log('[MAP] Province groups:', [...this.provFeatureMap.keys()]);
-  }
-
-  // ── Build overview map ─────────────────────────────────────────────────────
-  private buildMap(): void {
-    this.rebuildWithProjection(null);
-  }
-
-  /**
-   * Rebuild the SVG.
-   * @param zoomFeature If null: draw full Spain (composite proj).
-   *                    If a GeoJSON feature: zoom to that feature using
-   *                    a fresh mercator projection fitted to its bounding box.
-   */
-  private rebuildWithProjection(zoomFeature: any | null): void {
+  private buildFullMap(): void {
     this.isLoading = true;
-    if (!this.topoCC) { this.isLoading = false; return; }
+
+    if (!this.topoCC) {
+      this.isLoading = false;
+      return;
+    }
 
     const wrapper = this.wrapperRef.nativeElement;
     this.W = Math.max(wrapper.clientWidth, 400);
     this.H = Math.round(this.W * 0.65);
 
-    this.svg = d3.select(this.svgRef.nativeElement)
-      .attr('viewBox', `0 0 ${this.W} ${this.H}`)
-      .attr('width',   this.W)
-      .attr('height',  this.H);
+    const svgEl = this.svgRef.nativeElement;
+    svgEl.setAttribute('viewBox', `0 0 ${this.W} ${this.H}`);
+    svgEl.setAttribute('width', String(this.W));
+    svgEl.setAttribute('height', String(this.H));
 
+    this.svg = d3.select(svgEl);
     this.svg.selectAll('*').remove();
+    this.screenBounds.clear();
+    this.ccaaByName.clear();
+    this.provByCCAA.clear();
 
-    const padX = Math.round(this.W * 0.04);
-    const padY = Math.round(this.H * 0.04);
+    const useComposite =
+      typeof d3CompositeProjections !== 'undefined' &&
+      typeof d3CompositeProjections.geoConicConformalSpain === 'function';
 
-    let proj: any;
-    let pathFn: d3.GeoPath;
+    this.proj = useComposite
+      ? d3CompositeProjections.geoConicConformalSpain!()
+      : (d3.geoConicConformal().center([-3.7, 40.2]).rotate([0, 0]).parallels([36, 44]) as d3.GeoProjection);
+
     const ccaaGeo = topojson.feature(
-      this.topoCC!, (this.topoCC as any).objects.autonomous_regions as GeometryCollection
-    );
+      this.topoCC,
+      (this.topoCC as Topology & { objects: Record<string, GeometryCollection> }).objects[
+        'autonomous_regions'
+      ]
+    ) as SpainFeatureCollection;
 
-    if (!zoomFeature) {
-      // ── OVERVIEW: use composite projection for Canarias placement ──────
-      const useComposite =
-        typeof d3CompositeProjections !== 'undefined' &&
-        typeof d3CompositeProjections.geoConicConformalSpain === 'function';
+    const pad = Math.round(this.W * 0.03);
+    this.proj.fitSize([this.W - pad * 2, this.H - pad * 2], ccaaGeo);
 
-      proj = useComposite
-        ? d3CompositeProjections.geoConicConformalSpain()
-        : d3.geoConicConformal().center([-3.7, 40.2]).rotate([0, 0]).parallels([36, 44]);
+    const currentTranslate = this.proj.translate();
+    this.proj.translate([currentTranslate[0] + pad, currentTranslate[1] + pad]);
+    this.pathFn = d3.geoPath(this.proj);
 
-      proj.fitSize([this.W - padX*2, this.H - padY*2], ccaaGeo);
-      proj.translate([proj.translate()[0] + padX, proj.translate()[1] + padY]);
-      this.projFull = proj;
-      pathFn = d3.geoPath(proj);
-      this.pathFull = pathFn;
-    } else {
-      // ── ZOOM: use mercator fitted to this specific feature ─────────────
-      // This avoids the composite projection repositioning issue
-      proj = d3.geoMercator();
-      proj.fitExtent([[padX*3, padY*3], [this.W - padX*3, this.H - padY*3]], zoomFeature);
-      pathFn = d3.geoPath(proj);
+    ccaaGeo.features.forEach((feature) => {
+      const key = this.norm(this.getLabel(feature));
+      this.ccaaByName.set(key, feature);
+      this.screenBounds.set(key, this.pathFn.bounds(feature) as ScreenBounds);
+    });
+
+    if (this.topoProv) {
+      const provGeo = topojson.feature(
+        this.topoProv,
+        (this.topoProv as Topology & { objects: Record<string, GeometryCollection> }).objects['provinces']
+      ) as SpainFeatureCollection;
+
+      provGeo.features.forEach((feature) => {
+        const rawId = String(feature.id ?? '').padStart(2, '0');
+        const ccaaName = PROV_TO_CCAA[rawId];
+        if (!ccaaName) {
+          return;
+        }
+
+        const key = this.norm(ccaaName);
+        if (!this.provByCCAA.has(key)) {
+          this.provByCCAA.set(key, []);
+        }
+        this.provByCCAA.get(key)!.push(feature);
+      });
     }
 
-    // ── Draw CCAA regions ───────────────────────────────────────────────
-    this.svg.append('g').attr('class', 'ccaa-layer')
-      .selectAll<SVGPathElement, any>('path.ccaa')
-      .data((ccaaGeo as any).features)
+    this.drawCCAA(ccaaGeo);
+    this.drawProvinces();
+    this.drawCompositionBorders();
+    this.drawLabels(ccaaGeo);
+
+    this.isLoading = false;
+  }
+
+  private drawCCAA(ccaaGeo: SpainFeatureCollection): void {
+    this.svg
+      .append('g')
+      .attr('class', 'ccaa-layer')
+      .selectAll<SVGPathElement, SpainFeature>('path.ccaa')
+      .data(ccaaGeo.features)
       .join('path')
-      .attr('class',  'ccaa')
-      .attr('d',      pathFn as any)
-      .attr('fill',   f => this.fillForCCAA(f))
+      .attr('class', 'ccaa')
+      .attr('d', this.pathFn)
+      .attr('fill', (feature) => this.fillFor(feature))
       .attr('stroke', 'white')
       .attr('stroke-width', 0.8)
       .attr('stroke-linejoin', 'round')
       .style('cursor', 'pointer')
-      .on('mouseenter', (ev: MouseEvent, f: any) => {
-        if (!this.isCCAASelected(f)) {
-          d3.select(ev.currentTarget as Element).attr('fill', '#3a9fd4');
+      .on('mouseenter', (event, feature) => {
+        if (!this.isSelected(feature)) {
+          d3.select(event.currentTarget).attr('fill', '#3a9fd4');
         }
-        const rect = wrapper.getBoundingClientRect();
+
+        const rect = this.wrapperRef.nativeElement.getBoundingClientRect();
         this.zone.run(() => {
-          this.tooltip = { visible: true, x: ev.clientX - rect.left, y: ev.clientY - rect.top, name: this.ccaaLabel(f) };
+          this.tooltip = {
+            visible: true,
+            x: event.clientX - rect.left,
+            y: event.clientY - rect.top,
+            name: this.getLabel(feature),
+          };
         });
       })
-      .on('mousemove', (ev: MouseEvent) => {
-        const rect = wrapper.getBoundingClientRect();
-        this.tooltip.x = ev.clientX - rect.left;
-        this.tooltip.y = ev.clientY - rect.top;
+      .on('mousemove', (event) => {
+        const rect = this.wrapperRef.nativeElement.getBoundingClientRect();
+        this.tooltip.x = event.clientX - rect.left;
+        this.tooltip.y = event.clientY - rect.top;
       })
-      .on('mouseleave', (ev: MouseEvent, f: any) => {
-        d3.select(ev.currentTarget as Element).attr('fill', this.fillForCCAA(f));
-        this.zone.run(() => { this.tooltip = { ...this.tooltip, visible: false }; });
+      .on('mouseleave', (event, feature) => {
+        d3.select(event.currentTarget).attr('fill', this.fillFor(feature));
+        this.zone.run(() => {
+          this.tooltip = { ...this.tooltip, visible: false };
+        });
       })
-      .on('click', (_ev: MouseEvent, f: any) => {
-        const label    = this.ccaaLabel(f);
-        const resolved = this.resolveCCAA(label);
-        if (!resolved || resolved.id === '00') return;
+      .on('click', (_event, feature) => {
+        const label = this.getLabel(feature);
+        const ccaa = this.resolveCCAAFromLabel(label);
 
-        // Get this exact feature from our map (no fuzzy name issues)
-        const feature = this.ccaaFeatureMap.get(this.norm(label));
+        if (!ccaa) {
+          return;
+        }
 
         this.zone.run(() => {
-          this.tooltip  = { ...this.tooltip, visible: false };
+          this.tooltip = { ...this.tooltip, visible: false };
           this.isZoomed = true;
-          this.state.selectCCAA(resolved);
-          // Rebuild with zoom projection centred on this feature
-          this.rebuildWithProjection(feature ?? f);
+          this.state.selectCCAA(ccaa);
+          this.redrawFills();
+          this.zoomToScreenBounds(this.norm(label));
+          this.showProvinces(this.norm(ccaa.name));
         });
       });
+  }
 
-    // ── Draw province borders (only when zoomed) ──────────────────────────
-    if (zoomFeature && this.topoProv) {
-      const labelKey = this.getSelectedCCAAKey();
-      const provs    = this.provFeatureMap.get(labelKey) ?? [];
-
-      if (provs.length > 0) {
-        const provPath = d3.geoPath(proj);
-        this.svg.append('g').attr('class', 'prov-layer')
-          .selectAll<SVGPathElement, any>('path.prov')
-          .data(provs)
-          .join('path')
-          .attr('class',  'prov')
-          .attr('d',      provPath as any)
-          .attr('fill',   'none')
-          .attr('stroke', 'rgba(255,255,255,0.75)')
-          .attr('stroke-width', 1.2)
-          .attr('pointer-events', 'none');
-      }
+  private drawProvinces(): void {
+    if (!this.topoProv) {
+      return;
     }
 
-    // ── Composition borders (only on overview) ───────────────────────────
-    if (!zoomFeature && typeof proj.getCompositionBorders === 'function') {
-      this.svg.append('path')
-        .attr('d', proj.getCompositionBorders())
-        .attr('fill', 'none').attr('stroke', '#7ab8d9')
-        .attr('stroke-width', 0.8).attr('stroke-dasharray', '4,3').attr('opacity', 0.6);
+    const provGeo = topojson.feature(
+      this.topoProv,
+      (this.topoProv as Topology & { objects: Record<string, GeometryCollection> }).objects['provinces']
+    ) as SpainFeatureCollection;
+
+    this.svg
+      .append('g')
+      .attr('class', 'prov-layer')
+      .attr('opacity', 0)
+      .selectAll<SVGPathElement, SpainFeature>('path.prov')
+      .data(provGeo.features)
+      .join('path')
+      .attr('class', 'prov')
+      .attr('d', this.pathFn)
+      .attr('fill', 'none')
+      .attr('stroke', 'rgba(255,255,255,0.7)')
+      .attr('stroke-width', 0.4)
+      .attr('pointer-events', 'none');
+  }
+
+  private drawCompositionBorders(): void {
+    if (typeof this.proj.getCompositionBorders !== 'function') {
+      return;
     }
 
-    // ── Labels ────────────────────────────────────────────────────────────
-    const fs = zoomFeature
-      ? Math.max(10, Math.round(this.W / 60))   // larger when zoomed
-      : Math.max(7,  Math.round(this.W / 115));  // smaller on overview
+    this.svg
+      .append('path')
+      .attr('d', this.proj.getCompositionBorders())
+      .attr('fill', 'none')
+      .attr('stroke', '#7ab8d9')
+      .attr('stroke-width', 0.8)
+      .attr('stroke-dasharray', '4,3')
+      .attr('opacity', 0.6);
+  }
 
-    this.svg.append('g').attr('class', 'labels')
-      .selectAll('text')
-      .data((ccaaGeo as any).features)
+  private drawLabels(ccaaGeo: SpainFeatureCollection): void {
+    const fontSize = Math.max(7, Math.round(this.W / 115));
+
+    this.svg
+      .append('g')
+      .attr('class', 'labels')
+      .selectAll<SVGTextElement, SpainFeature>('text')
+      .data(ccaaGeo.features)
       .join('text')
-      .attr('transform', (f: any) => {
-        const c = pathFn.centroid(f);
-        return c && isFinite(c[0]) ? `translate(${c})` : 'translate(-999,-999)';
+      .attr('transform', (feature) => {
+        const centroid = this.pathFn.centroid(feature);
+        return centroid && Number.isFinite(centroid[0])
+          ? `translate(${centroid[0]},${centroid[1]})`
+          : 'translate(-999,-999)';
       })
-      .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
-      .attr('font-size', fs)
-      .attr('font-family', 'var(--font-primary), system-ui, sans-serif')
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .attr('font-size', fontSize)
+      .attr('font-family', 'var(--font-primary), system-ui')
       .attr('font-weight', '500')
       .attr('fill', 'rgba(255,255,255,0.88)')
       .attr('pointer-events', 'none')
       .attr('paint-order', 'stroke')
       .attr('stroke', 'rgba(2,80,140,0.30)')
-      .attr('stroke-width', fs * 0.4)
-      .text((f: any) => this.shortLabel(this.ccaaLabel(f)));
-
-    this.isLoading = false;
+      .attr('stroke-width', fontSize * 0.4)
+      .text((feature) => this.shortLabel(this.getLabel(feature)));
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
-  private getSelectedCCAAKey(): string {
-    return this.norm(this.state.selectedCCAA().name);
+  private zoomToScreenBounds(key: string): void {
+    let bounds = this.screenBounds.get(key);
+
+    if (!bounds) {
+      for (const [currentKey, currentBounds] of this.screenBounds.entries()) {
+        if (currentKey.includes(key) || key.includes(currentKey)) {
+          bounds = currentBounds;
+          break;
+        }
+      }
+    }
+
+    if (!bounds) {
+      return;
+    }
+
+    const [[x0, y0], [x1, y1]] = bounds;
+    const bw = x1 - x0;
+    const bh = y1 - y0;
+    const area = bw * bh;
+    const pf = area < 400 ? 3.0 : area < 2000 ? 1.2 : area < 8000 ? 0.4 : 0.2;
+    const px = bw * pf;
+    const py = bh * pf;
+    const vx = x0 - px;
+    const vy = y0 - py;
+    const vw = bw + px * 2;
+    const vh = bh + py * 2;
+
+    const svgEl = this.svgRef.nativeElement;
+    const interp = d3.interpolateArray([0, 0, this.W, this.H], [vx, vy, vw, vh]);
+
+    d3.select(svgEl)
+      .transition()
+      .duration(600)
+      .ease(d3.easeCubicInOut)
+      .tween('viewBox', () => (t: number) => {
+        const [x, y, w, h] = interp(t) as number[];
+        svgEl.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
+
+        const scale = this.W / w;
+        svgEl.querySelectorAll<SVGPathElement>('path.ccaa').forEach((path) => {
+          path.setAttribute('stroke-width', `${(0.8 / scale).toFixed(3)}`);
+        });
+        svgEl.querySelectorAll<SVGPathElement>('path.prov').forEach((path) => {
+          path.setAttribute('stroke-width', `${(0.4 / scale).toFixed(3)}`);
+        });
+
+        const baseFontSize = Math.max(7, Math.round(this.W / 115));
+        svgEl.querySelectorAll<SVGTextElement>('g.labels text').forEach((text) => {
+          const scaled = (baseFontSize / scale) * 2.2;
+          text.setAttribute('font-size', scaled.toFixed(2));
+          text.setAttribute('stroke-width', `${(scaled * 0.35).toFixed(2)}`);
+        });
+      });
   }
 
-  private isCCAASelected(f: any): boolean {
-    const sel = this.state.selectedCCAA();
-    if (sel.id === '00') return false;
-    // Exact match by normalised name
-    const rn = this.norm(this.ccaaLabel(f));
-    const sn = this.norm(sel.name);
-    return rn === sn || rn.includes(sn) || sn.includes(rn);
+  private resetViewBox(): void {
+    const svgEl = this.svgRef.nativeElement;
+    const currentViewBox = (svgEl.getAttribute('viewBox') ?? `0 0 ${this.W} ${this.H}`)
+      .split(' ')
+      .map(Number);
+
+    const interp = d3.interpolateArray(currentViewBox, [0, 0, this.W, this.H]);
+
+    d3.select(svgEl)
+      .transition()
+      .duration(500)
+      .ease(d3.easeCubicInOut)
+      .tween('viewBox', () => (t: number) => {
+        const [x, y, w, h] = interp(t) as number[];
+        svgEl.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
+
+        const scale = this.W / w;
+        svgEl.querySelectorAll<SVGPathElement>('path.ccaa').forEach((path) => {
+          path.setAttribute('stroke-width', `${(0.8 / scale).toFixed(3)}`);
+        });
+        svgEl.querySelectorAll<SVGPathElement>('path.prov').forEach((path) => {
+          path.setAttribute('stroke-width', `${(0.4 / scale).toFixed(3)}`);
+        });
+
+        const baseFontSize = Math.max(7, Math.round(this.W / 115));
+        svgEl.querySelectorAll<SVGTextElement>('g.labels text').forEach((text) => {
+          const scaled = baseFontSize / scale;
+          text.setAttribute('font-size', scaled.toFixed(2));
+          text.setAttribute('stroke-width', `${(scaled * 0.4).toFixed(2)}`);
+        });
+      });
+
+    this.svg.select('g.prov-layer').transition().duration(400).attr('opacity', 0);
+    this.redrawFills();
   }
 
-  private fillForCCAA(f: any): string {
-    return this.isCCAASelected(f) ? '#0274b8' : '#7ac4e8';
+  private showProvinces(ccaaKey: string): void {
+    this.svg.select('g.prov-layer').transition().duration(400).attr('opacity', 1);
+
+    this.svg
+      .selectAll<SVGPathElement, SpainFeature>('path.prov')
+      .attr('display', (feature) => {
+        const rawId = String(feature.id ?? '').padStart(2, '0');
+        const ccaaName = PROV_TO_CCAA[rawId];
+        return this.norm(ccaaName ?? '') === ccaaKey ? null : 'none';
+      });
   }
 
-  /**
-   * Resolve a TopoJSON region label to a ComunidadAutonoma from state.
-   * Uses EXACT normalised match first, then single-direction includes.
-   */
-  private resolveCCAA(label: string) {
-    const rl = this.norm(label);
-    const comunidades = this.state.comunidades().filter(c => c.id !== '00');
+  private isSelected(feature: SpainFeature): boolean {
+    const selected = this.state.selectedCCAA();
+    if (selected.id === '00') {
+      return false;
+    }
 
-    // 1. Exact match
-    let found = comunidades.find(c => this.norm(c.name) === rl);
-    if (found) return found;
-
-    // 2. TopoJSON name contains our name (e.g. "País Vasco/Euskadi" contains "País Vasco")
-    found = comunidades.find(c => rl.includes(this.norm(c.name)));
-    if (found) return found;
-
-    // 3. Our name contains TopoJSON name (e.g. "Principado de Asturias" contains "Asturias")
-    found = comunidades.find(c => this.norm(c.name).includes(rl));
-    return found;
+    const featureName = this.norm(this.getLabel(feature));
+    const selectedName = this.norm(selected.name);
+    return (
+      featureName === selectedName ||
+      featureName.includes(selectedName) ||
+      selectedName.includes(featureName)
+    );
   }
 
-  private ccaaLabel(f: any): string {
-    return f.properties?.NAME_1 ?? f.properties?.name ?? f.properties?.NAME ?? '';
+  private fillFor(feature: SpainFeature): string {
+    return this.isSelected(feature) ? '#0274b8' : '#7ac4e8';
+  }
+
+  private redrawFills(): void {
+    if (!this.svg) {
+      return;
+    }
+
+    this.svg
+      .selectAll<SVGPathElement, SpainFeature>('path.ccaa')
+      .attr('fill', (feature) => this.fillFor(feature));
+  }
+
+  private resolveCCAAFromLabel(label: string): ComunidadAutonoma | undefined {
+    const normalizedLabel = this.norm(label);
+    const list = this.state.comunidades().filter((item) => item.id !== '00');
+
+    return (
+      list.find((item) => this.norm(item.name) === normalizedLabel) ??
+      list.find((item) => normalizedLabel.includes(this.norm(item.name))) ??
+      list.find((item) => this.norm(item.name).includes(normalizedLabel))
+    );
+  }
+
+  private getLabel(feature: SpainFeature): string {
+    const properties = feature.properties ?? {};
+    return String(properties['NAME_1'] ?? properties['name'] ?? properties['NAME'] ?? '');
+  }
+
+  private norm(value: string): string {
+    return value
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/\p{Diacritic}/gu, '')
+      .replace(/[^a-z\s]/g, '')
+      .trim();
   }
 
   private shortLabel(name: string): string {
-    const M: Record<string,string> = {
-      'Andalucía':'Andalucía','Aragón':'Aragón',
-      'Principado de Asturias':'Asturias','Illes Balears':'Baleares',
-      'Canarias':'Canarias','Cantabria':'Cantabria',
-      'Castilla-La Mancha':'C-La Mancha','Castilla y León':'C. y León',
-      'Cataluña':'Cataluña','Cataluña/Catalunya':'Cataluña',
-      'Extremadura':'Extremadura','Galicia':'Galicia','La Rioja':'La Rioja',
-      'Comunidad de Madrid':'Madrid','Región de Murcia':'Murcia',
-      'Comunidad Foral de Navarra':'Navarra',
-      'País Vasco':'P. Vasco','País Vasco/Euskadi':'P. Vasco',
-      'Comunitat Valenciana':'Valencia',
-      'Ciudad Autónoma de Ceuta':'Ceuta','Ciudad Autónoma de Melilla':'Melilla',
-      'Ceuta':'Ceuta','Melilla':'Melilla',
+    const labels: Record<string, string> = {
+      Andalucía: 'Andalucía',
+      Aragón: 'Aragón',
+      'Principado de Asturias': 'Asturias',
+      'Illes Balears': 'Baleares',
+      Canarias: 'Canarias',
+      Cantabria: 'Cantabria',
+      'Castilla-La Mancha': 'C-La Mancha',
+      'Castilla y León': 'C. y León',
+      Cataluña: 'Cataluña',
+      'Cataluña/Catalunya': 'Cataluña',
+      Extremadura: 'Extremadura',
+      Galicia: 'Galicia',
+      'La Rioja': 'La Rioja',
+      'Comunidad de Madrid': 'Madrid',
+      'Región de Murcia': 'Murcia',
+      'Comunidad Foral de Navarra': 'Navarra',
+      'País Vasco': 'P. Vasco',
+      'País Vasco/Euskadi': 'P. Vasco',
+      'Comunitat Valenciana': 'Valencia',
+      Ceuta: 'Ceuta',
+      Melilla: 'Melilla',
+      'Ciudad Autónoma de Ceuta': 'Ceuta',
+      'Ciudad Autónoma de Melilla': 'Melilla',
     };
-    return M[name] ?? name.split('/')[0].split(' ').slice(0,2).join(' ');
-  }
 
-  private norm(name: string): string {
-    return name.toLowerCase()
-      .normalize('NFD').replace(/\p{Diacritic}/gu, '')
-      .replace(/[^a-z\s]/g,'').trim();
+    return labels[name] ?? name.split('/')[0].split(' ').slice(0, 2).join(' ');
   }
 
   private setupResize(): void {
     this.resizeObserver = new ResizeObserver(() => {
-      clearTimeout(this.resizeTimer);
+      if (this.resizeTimer) {
+        clearTimeout(this.resizeTimer);
+      }
+
       this.resizeTimer = setTimeout(() => {
-        const sel = this.state.selectedCCAA();
-        if (this.isZoomed && sel.id !== '00') {
-          const feature = this.ccaaFeatureMap.get(this.norm(sel.name))
-            ?? [...this.ccaaFeatureMap.entries()]
-               .find(([k]) => k.includes(this.norm(sel.name)) || this.norm(sel.name).includes(k))
-               ?.[1];
-          this.rebuildWithProjection(feature ?? null);
-        } else {
-          this.isZoomed = false;
-          this.buildMap();
+        const wasZoomed = this.isZoomed;
+        const selected = this.state.selectedCCAA();
+
+        this.buildFullMap();
+
+        if (wasZoomed && selected.id !== '00') {
+          this.isZoomed = true;
+          const selectedName = this.norm(selected.name);
+          const key = [...this.screenBounds.keys()].find(
+            (currentKey) =>
+              currentKey === selectedName ||
+              currentKey.includes(selectedName) ||
+              selectedName.includes(currentKey)
+          );
+
+          if (key) {
+            this.redrawFills();
+            this.zoomToScreenBounds(key);
+            this.showProvinces(key);
+          }
         }
       }, 150);
     });
+
     this.resizeObserver.observe(this.wrapperRef.nativeElement);
   }
 }
